@@ -6,6 +6,7 @@ using LiteNetLib;
 using LiteEntitySystem.Internal;
 using LiteEntitySystem.Transport;
 using LiteNetLib.Utils;
+using System.Numerics;
 
 namespace LiteEntitySystem
 {
@@ -48,7 +49,7 @@ namespace LiteEntitySystem
         private readonly StateSerializer[] _stateSerializers = new StateSerializer[MaxSyncedEntityCount];
         private readonly byte[] _inputDecodeBuffer = new byte[NetConstants.MaxUnreliableDataSize];
         private readonly NetDataReader _requestsReader = new();
-        
+
         //use entity filter for correct sort (id+version+creationTime)
         private readonly EntityFilter<InternalEntity> _changedEntities = new();
         
@@ -127,11 +128,14 @@ namespace LiteEntitySystem
         /// <returns>Newly created player, null if players count is maximum</returns>
         public NetPlayer AddPlayer(AbstractNetPeer peer)
         {
-            if (_netPlayers.Count == MaxPlayers)
+            if (_netPlayers.Count >= MaxPlayers)
                 return null;
-            var player = new NetPlayer(peer, _playerIdQueue.GetNewId()) { State = NetPlayerState.RequestBaseline };
+            if (peer.AssignedPlayer is not NetPlayer player)
+            {
+                player = new NetPlayer(peer, _playerIdQueue.GetNewId()) { State = NetPlayerState.RequestBaseline };
+                peer.AssignedPlayer = player;
+            }
             _netPlayers.Set(player.Id, player);
-            peer.AssignedPlayer = player;
             return player;
         }
 
