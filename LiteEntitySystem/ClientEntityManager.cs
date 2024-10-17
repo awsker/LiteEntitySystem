@@ -268,7 +268,7 @@ namespace LiteEntitySystem
             {
                 if (inData[1] == InternalPackets.BaselineSync)
                 {
-                    if (inData.Length < sizeof(BaselineDataHeader) + 2)
+                    if (inData.Length < sizeof(BaselineDataHeader))
                         return DeserializeResult.Error;
                     _entitiesToConstructCount = 0;
                     _syncCallsCount = 0;
@@ -276,7 +276,7 @@ namespace LiteEntitySystem
                     //read header and decode
                     int decodedBytes;
                     var header = *(BaselineDataHeader*)rawData;
-                    if (header.OriginalLength <= 0)
+                    if (header.OriginalLength < 0)
                         return DeserializeResult.Error;
                     _serverSendRate = (ServerSendRate)header.SendRate;
 
@@ -332,7 +332,7 @@ namespace LiteEntitySystem
                 }
                 else
                 {
-                    if (inData.Length < sizeof(DiffPartHeader) + 2)
+                    if (inData.Length < sizeof(DiffPartHeader))
                         return DeserializeResult.Error;
                     var diffHeader = *(DiffPartHeader*)rawData;
                     int tickDifference = Utils.SequenceDiff(diffHeader.Tick, _lastReadyTick);
@@ -457,6 +457,7 @@ namespace LiteEntitySystem
                 ref readonly var classData = ref entity.ClassData;
                 if(entity.IsRemoteControlled && !classData.HasRemoteRollbackFields)
                     continue;
+                entity.OnBeforeRollback();
 
                 fixed (byte* predictedData = classData.ClientPredictedData(entity))
                 {
