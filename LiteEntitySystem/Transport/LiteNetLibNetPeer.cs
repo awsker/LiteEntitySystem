@@ -11,19 +11,19 @@ namespace LiteEntitySystem.Transport
         {
             NetPeer = netPeer;
             if(assignToTag)
-                NetPeer.Tag = this;
+                NetPeer.Tag2 = this;
         }
 
         public override void TriggerSend() => NetPeer.NetManager.TriggerUpdate();
-        public override void SendReliableOrdered(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.ReliableOrdered);
-        public override void SendUnreliable(ReadOnlySpan<byte> data) => NetPeer.Send(data, 0, DeliveryMethod.Unreliable);
+        public override void SendReliableOrdered(ReadOnlySpan<byte> data) => NetPeer.Send(data, 1, DeliveryMethod.ReliableOrdered);
+        public override void SendUnreliable(ReadOnlySpan<byte> data) => NetPeer.Send(data, 1, DeliveryMethod.Unreliable);
         public override int GetMaxUnreliablePacketSize() => NetPeer.GetMaxSinglePacketSize(DeliveryMethod.Unreliable);
         public override string ToString() => NetPeer.ToString();
     }
 
     public static class LiteNetLibExtensions
     {
-        public static LiteNetLibNetPeer GetLiteNetLibNetPeerFromTag(this NetPeer peer) => (LiteNetLibNetPeer)peer.Tag;
+        public static LiteNetLibNetPeer GetLiteNetLibNetPeerFromTag(this NetPeer peer) => (LiteNetLibNetPeer)peer.Tag2;
         public static LiteNetLibNetPeer GetLiteNetLibNetPeer(this NetPlayer player) => (LiteNetLibNetPeer)player.Peer;
     }
 }

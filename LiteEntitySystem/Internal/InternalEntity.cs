@@ -61,6 +61,31 @@ namespace LiteEntitySystem.Internal
         /// </summary>
         public readonly byte Version;
 
+        private int _visibilityLayer;
+
+        /// <summary>
+        /// Visibility filter allows this entity to only be visible to players within the same visibility filter
+        /// 0 is a special value meaning it's visible to all players
+        /// </summary>
+        public int VisibilityLayer
+        {
+            get
+            {
+                return _visibilityLayer;
+            }
+            set
+            {
+                if (_visibilityLayer != value)
+                {
+                    PreviousVisibilityLayer = _visibilityLayer;
+                    _visibilityLayer = value;
+                    VisibilityLayerChanged = true;
+                }
+            }
+        }
+        internal bool VisibilityLayerChanged;
+        internal int PreviousVisibilityLayer;
+
         internal EntityDataHeader DataHeader => new EntityDataHeader
         {
             Id = Id,
@@ -164,6 +189,29 @@ namespace LiteEntitySystem.Internal
             {
                 Logger.LogError($"Exception in entity({Id}) update:\n{e}");
             }   
+        }
+
+        internal bool IsVisibleToPlayer(HumanControllerLogic playerController)
+        {
+            return VisibilityLayer == 0 || playerController != null && VisibilityLayer == playerController.VisibilityLayer;
+        }
+
+        internal bool ShouldVisibilityChangeSendFull(HumanControllerLogic playerController)
+        {
+            if (playerController == null)
+                return false;
+            return (VisibilityLayerChanged || playerController.VisibilityLayerChanged) && VisibilityLayer > 0 && playerController.VisibilityLayer == VisibilityLayer;
+        }
+
+        internal bool ShouldVisibilityChangeDestroy(HumanControllerLogic playerController)
+        {
+            if (playerController == null)
+                return false;
+
+            //If player moved from this layer to a different layer OR
+            //This entity moved from the player's layer to a different one
+            return playerController.VisibilityLayerChanged && VisibilityLayer > 0 && playerController.PreviousVisibilityLayer == VisibilityLayer ||
+                   VisibilityLayerChanged && playerController.VisibilityLayer > 0 && playerController.VisibilityLayer == PreviousVisibilityLayer;
         }
 
         /// <summary>
