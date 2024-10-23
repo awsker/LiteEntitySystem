@@ -60,7 +60,7 @@ namespace LiteEntitySystem.Internal
         /// Entity version (for id reuse)
         /// </summary>
         public readonly byte Version;
-
+        /*
         private int _visibilityLayer;
 
         /// <summary>
@@ -85,7 +85,7 @@ namespace LiteEntitySystem.Internal
         }
         internal bool VisibilityLayerChanged;
         internal int PreviousVisibilityLayer;
-
+        */
         internal EntityDataHeader DataHeader => new EntityDataHeader
         {
             Id = Id,
@@ -190,29 +190,29 @@ namespace LiteEntitySystem.Internal
                 Logger.LogError($"Exception in entity({Id}) update:\n{e}");
             }   
         }
-
-        internal bool IsVisibleToPlayer(HumanControllerLogic playerController)
+        /*
+        internal bool IsVisibleToPlayer(NetPlayer player)
         {
-            return VisibilityLayer == 0 || playerController != null && VisibilityLayer == playerController.VisibilityLayer;
+            return VisibilityLayer == 0 || player != null && VisibilityLayer == player.VisibilityLayer;
         }
 
-        internal bool ShouldVisibilityChangeSendFull(HumanControllerLogic playerController)
+        internal bool ShouldVisibilityChangeSendFull(NetPlayer player)
         {
-            if (playerController == null)
+            if (player == null)
                 return false;
-            return (VisibilityLayerChanged || playerController.VisibilityLayerChanged) && VisibilityLayer > 0 && playerController.VisibilityLayer == VisibilityLayer;
+            return (VisibilityLayerChanged || player.VisibilityLayerChanged) && VisibilityLayer > 0 && player.VisibilityLayer == VisibilityLayer;
         }
 
-        internal bool ShouldVisibilityChangeDestroy(HumanControllerLogic playerController)
+        internal bool ShouldVisibilityChangeDestroy(NetPlayer player)
         {
-            if (playerController == null)
+            if (player == null)
                 return false;
 
             //If player moved from this layer to a different layer OR
             //This entity moved from the player's layer to a different one
-            return playerController.VisibilityLayerChanged && VisibilityLayer > 0 && playerController.PreviousVisibilityLayer == VisibilityLayer ||
-                   VisibilityLayerChanged && playerController.VisibilityLayer > 0 && playerController.VisibilityLayer == PreviousVisibilityLayer;
-        }
+            return player.VisibilityLayerChanged && VisibilityLayer > 0 && player.PreviousVisibilityLayer == VisibilityLayer ||
+                   VisibilityLayerChanged && player.VisibilityLayer > 0 && player.VisibilityLayer == PreviousVisibilityLayer;
+        }*/
 
         /// <summary>
         /// Fixed update. Called if entity has attribute <see cref="EntityFlagsAttribute"/> and flag Updateable

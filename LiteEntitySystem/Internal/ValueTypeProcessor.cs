@@ -35,9 +35,11 @@ namespace LiteEntitySystem.Internal
             *(T*)tempHistory = a;
             a = *(T*)historyA;
         }
-        
-        internal override void SetFrom(InternalBaseClass obj, int offset, byte* data) =>
+
+        internal override void SetFrom(InternalBaseClass obj, int offset, byte* data)
+        {
             RefMagic.RefFieldValue<T>(obj, offset) = *(T*)data;
+        }
 
         internal override bool SetFromAndSync(InternalBaseClass obj, int offset, byte* data) =>
             RefMagic.RefFieldValue<SyncVar<T>>(obj, offset).SetFromAndSync(data);
