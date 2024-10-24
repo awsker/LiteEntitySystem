@@ -6,6 +6,7 @@ using LiteNetLib;
 using LiteEntitySystem.Internal;
 using LiteEntitySystem.Transport;
 using LiteNetLib.Utils;
+using System.Linq;
 
 namespace LiteEntitySystem
 {
@@ -419,7 +420,7 @@ namespace LiteEntitySystem
             //Debug.Log($"[SEM] Entity create. clsId: {classData.ClassId}, id: {entityId}, v: {version}");
             return entity;
         }
-        
+
         protected override unsafe void OnLogicTick()
         {
             //read pending client requests
@@ -428,18 +429,18 @@ namespace LiteEntitySystem
                 _requestsReader.SetSource(_pendingClientRequests.Dequeue());
                 InputProcessor.ReadClientRequest(this, _requestsReader);
             }
-            
+
             for (int pidx = 0; pidx < _netPlayers.Count; pidx++)
             {
                 var player = _netPlayers.GetByIndex(pidx);
-                if (player.State == NetPlayerState.RequestBaseline) 
+                if (player.State == NetPlayerState.RequestBaseline)
                     continue;
                 if (player.AvailableInput.Count == 0)
                 {
                     //Logger.LogWarning($"Inputs of player {pidx} is zero");
                     continue;
                 }
-                
+
                 var inputFrame = player.AvailableInput.ExtractMin();
                 ref var inputData = ref inputFrame.InputHeader;
                 player.LastProcessedTick = inputFrame.Tick;
@@ -465,24 +466,25 @@ namespace LiteEntitySystem
             else
                 foreach (var aliveEntity in AliveEntities)
                     aliveEntity.Update();
-            
+
             foreach (var lagCompensatedEntity in LagCompensatedEntities)
                 lagCompensatedEntity.WriteHistory(_tick);
-            
+
             //==================================================================
             //Sending part
             //==================================================================
-            if (_netPlayers.Count == 0 || _tick % (int) SendRate != 0)
+            if (_netPlayers.Count == 0 || _tick % (int)SendRate != 0)
                 return;
-            
+
             while (MaxSyncedEntityId > 0 && _stateSerializers[MaxSyncedEntityId].State == SerializerState.Freed)
                 MaxSyncedEntityId--;
 
             //calculate minimalTick and potential baseline size
             _minimalTick = _tick;
-            
+
             int maxBaseline = 0;
             int playersCount = _netPlayers.Count;
+            var changedIds = new HashSet<ushort>(_changedEntities.Select(e => e.Id));
             for (int pidx = 0; pidx < playersCount; pidx++)
             {
                 var player = _netPlayers.GetByIndex(pidx);
@@ -503,129 +505,146 @@ namespace LiteEntitySystem
 
             //make packets
             fixed (byte* packetBuffer = _packetBuffer, compressionBuffer = _compressionBuffer)
-            // ReSharper disable once BadChildStatementIndent
-            for (int pidx = 0; pidx < playersCount; pidx++)
             {
-                var player = _netPlayers.GetByIndex(pidx);
-                if (player.State == NetPlayerState.RequestBaseline)
+                // ReSharper disable once BadChildStatementIndent
+                for (int pidx = 0; pidx < playersCount; pidx++)
                 {
-                    int originalLength = 0;
-                    for (ushort i = FirstEntityId; i <= MaxSyncedEntityId; i++)
-                        _stateSerializers[i].MakeBaseline(player.Id, _tick, packetBuffer, ref originalLength);
-                    
-                    //set header
-                    *(BaselineDataHeader*)compressionBuffer = new BaselineDataHeader
+                    var player = _netPlayers.GetByIndex(pidx);
+                    if (player.State == NetPlayerState.RequestBaseline)
                     {
-                        UserHeader = HeaderByte,
-                        PacketType = InternalPackets.BaselineSync,
-                        OriginalLength = originalLength,
-                        Tick = _tick,
-                        PlayerId = player.Id,
-                        SendRate = (byte)SendRate
-                    };
-                    
-                    //compress
-                    int encodedLength = LZ4Codec.Encode(
-                        packetBuffer,
-                        originalLength,
-                        compressionBuffer + sizeof(BaselineDataHeader),
-                        _compressionBuffer.Length - sizeof(BaselineDataHeader),
-                        LZ4Level.L00_FAST);
-                    
-                    player.Peer.SendReliableOrdered(new ReadOnlySpan<byte>(_compressionBuffer, 0, sizeof(BaselineDataHeader) + encodedLength));
-                    player.StateATick = _tick;
-                    player.CurrentServerTick = _tick;
-                    player.State = NetPlayerState.WaitingForFirstInput;
-                    Logger.Log($"[SEM] SendWorld to player {player.Id}. orig: {originalLength}, bytes, compressed: {encodedLength}, ExecutedTick: {_tick}");
-                    continue;
-                }
-                if (player.State != NetPlayerState.Active)
-                {
-                    //waiting to load initial state
-                    continue;
-                }
-
-                var playerController = GetPlayerController(player);
-                
-                //Partial diff sync
-                var header = (DiffPartHeader*)packetBuffer;
-                header->UserHeader = HeaderByte;
-                header->Part = 0;
-                header->Tick = _tick;
-                int writePosition = sizeof(DiffPartHeader);
-                
-                ushort maxPartSize = (ushort)(player.Peer.GetMaxUnreliablePacketSize() - sizeof(LastPartData));
-                foreach (var changedEntity in _changedEntities)
-                {
-                    ref var stateSerializer = ref _stateSerializers[changedEntity.Id];
-                    
-                    //all players has actual state so remove from sync
-                    if (Utils.SequenceDiff(stateSerializer.LastChangedTick, _minimalTick) <= 0)
-                    {
-                        _changedEntities.Remove(changedEntity);
-                        continue;
-                    }
-                    //skip known
-                    if (Utils.SequenceDiff(stateSerializer.LastChangedTick, player.StateATick) <= 0)
-                        continue;
-
-                    var diffResult = stateSerializer.MakeDiff(
-                        player.Id,
-                        _tick,
-                        _minimalTick,
-                        player.CurrentServerTick,
-                        packetBuffer,
-                        ref writePosition,
-                        playerController, false);
-                    if (diffResult == DiffResult.DoneAndDestroy)
-                    {
-                        _entityIdQueue.ReuseId(changedEntity.Id);
-                        _changedEntities.Remove(changedEntity);
-                    }
-                    else if (diffResult == DiffResult.Done)
-                    {
-                        int overflow = writePosition - maxPartSize;
-                        while (overflow > 0)
+                        int originalLength = 0;
+                        for (ushort i = FirstEntityId; i <= MaxSyncedEntityId; i++)
                         {
-                            if (header->Part == MaxParts-1)
-                            {
-                                Logger.Log($"P:{pidx} Request baseline {_tick}");
-                                player.State = NetPlayerState.RequestBaseline;
-                                break;
-                            }
-                            header->PacketType = InternalPackets.DiffSync;
-                            //Logger.LogWarning($"P:{pidx} Sending diff part {*partCount}: {_tick}");
-                            player.Peer.SendUnreliable(new ReadOnlySpan<byte>(_packetBuffer, 0, maxPartSize));
-                            header->Part++;
-
-                            //repeat in next packet
-                            RefMagic.CopyBlock(packetBuffer + sizeof(DiffPartHeader), packetBuffer + maxPartSize, (uint)overflow);
-                            writePosition = sizeof(DiffPartHeader) + overflow;
-                            overflow = writePosition - maxPartSize;
+                            ref var stateSerializer = ref _stateSerializers[i];
+                            if (stateSerializer.Entity.IsVisibleToPlayer(player))
+                                stateSerializer.MakeBaseline(player.Id, _tick, packetBuffer, ref originalLength);
                         }
-                        //if request baseline break entity loop
-                        if(player.State == NetPlayerState.RequestBaseline)
-                            break;
-                    }
-                    //else skip
-                }
-                
-                //if request baseline continue to other players
-                if(player.State == NetPlayerState.RequestBaseline)
-                    continue;
+                        //set header
+                        *(BaselineDataHeader*)compressionBuffer = new BaselineDataHeader
+                        {
+                            UserHeader = HeaderByte,
+                            PacketType = InternalPackets.BaselineSync,
+                            OriginalLength = originalLength,
+                            Tick = _tick,
+                            PlayerId = player.Id,
+                            SendRate = (byte)SendRate
+                        };
 
-                //Debug.Log($"PARTS: {partCount} {_netDataWriter.Data[4]}");
-                header->PacketType = InternalPackets.DiffSyncLast;
-                //put mtu at last packet
-                *(LastPartData*)(packetBuffer + writePosition) = new LastPartData
-                {
-                    LastProcessedTick = player.LastProcessedTick,
-                    LastReceivedTick = player.LastReceivedTick,
-                    Mtu = maxPartSize,
-                    BufferedInputsCount = (byte)player.AvailableInput.Count
-                };
-                writePosition += sizeof(LastPartData);
-                player.Peer.SendUnreliable(new ReadOnlySpan<byte>(_packetBuffer, 0, writePosition));
+                        //compress
+                        int encodedLength = LZ4Codec.Encode(
+                            packetBuffer,
+                            originalLength,
+                            compressionBuffer + sizeof(BaselineDataHeader),
+                            _compressionBuffer.Length - sizeof(BaselineDataHeader),
+                            LZ4Level.L00_FAST);
+
+                        player.Peer.SendReliableOrdered(new ReadOnlySpan<byte>(_compressionBuffer, 0, sizeof(BaselineDataHeader) + encodedLength));
+                        player.StateATick = _tick;
+                        player.CurrentServerTick = _tick;
+                        player.State = NetPlayerState.WaitingForFirstInput;
+                        Logger.Log($"[SEM] SendWorld to player {player.Id}. orig: {originalLength}, bytes, compressed: {encodedLength}, ExecutedTick: {_tick}");
+                        continue;
+                    }
+                    if (player.State != NetPlayerState.Active)
+                    {
+                        //waiting to load initial state
+                        continue;
+                    }
+
+                    var playerController = GetPlayerController(player);
+
+                    //Partial diff sync
+                    var header = (DiffPartHeader*)packetBuffer;
+                    header->UserHeader = HeaderByte;
+                    header->Part = 0;
+                    header->Tick = _tick;
+                    int writePosition = sizeof(DiffPartHeader);
+
+                    ushort maxPartSize = (ushort)(player.Peer.GetMaxUnreliablePacketSize() - sizeof(LastPartData));
+                    for (ushort i = FirstEntityId; i <= MaxSyncedEntityId; i++)
+                    {
+                        ref var stateSerializer = ref _stateSerializers[i];
+
+                        bool changed = changedIds.Contains(i);
+                        bool forceFullUpdate = stateSerializer.Entity.ShouldVisibilityChangeSendFull(player);
+
+                        //all players has actual state so remove from sync
+                        if (changed && Utils.SequenceDiff(stateSerializer.LastChangedTick, _minimalTick) <= 0)
+                        {
+                            _changedEntities.Remove(stateSerializer.Entity);
+                            continue;
+                        }
+                        //skip known
+                        if (!forceFullUpdate && Utils.SequenceDiff(stateSerializer.LastChangedTick, player.StateATick) <= 0)
+                            continue;
+                        DiffResult diffResult = DiffResult.Skip;
+                        if (forceFullUpdate || changed)
+                        {
+                            diffResult = stateSerializer.MakeDiff(
+                               player.Id,
+                               _tick,
+                               _minimalTick,
+                               player.CurrentServerTick,
+                               packetBuffer,
+                               ref writePosition,
+                               playerController, false);
+                        }
+                        if (diffResult == DiffResult.DoneAndDestroy)
+                        {
+                            _entityIdQueue.ReuseId(stateSerializer.Entity.Id);
+                            _changedEntities.Remove(stateSerializer.Entity);
+                        }
+                        else if (diffResult == DiffResult.Done)
+                        {
+                            int overflow = writePosition - maxPartSize;
+                            while (overflow > 0)
+                            {
+                                if (header->Part == MaxParts - 1)
+                                {
+                                    Logger.Log($"P:{pidx} Request baseline {_tick}");
+                                    player.State = NetPlayerState.RequestBaseline;
+                                    break;
+                                }
+                                header->PacketType = InternalPackets.DiffSync;
+                                //Logger.LogWarning($"P:{pidx} Sending diff part {*partCount}: {_tick}");
+                                player.Peer.SendUnreliable(new ReadOnlySpan<byte>(_packetBuffer, 0, maxPartSize));
+                                header->Part++;
+
+                                //repeat in next packet
+                                RefMagic.CopyBlock(packetBuffer + sizeof(DiffPartHeader), packetBuffer + maxPartSize, (uint)overflow);
+                                writePosition = sizeof(DiffPartHeader) + overflow;
+                                overflow = writePosition - maxPartSize;
+                            }
+                            //if request baseline break entity loop
+                            if (player.State == NetPlayerState.RequestBaseline)
+                                break;
+                        }
+                        //else skip
+                    }
+                    player.VisibilityLayerChanged = false;
+
+                    //if request baseline continue to other players
+                    if (player.State == NetPlayerState.RequestBaseline)
+                        continue;
+
+                    //Debug.Log($"PARTS: {partCount} {_netDataWriter.Data[4]}");
+                    header->PacketType = InternalPackets.DiffSyncLast;
+                    //put mtu at last packet
+                    *(LastPartData*)(packetBuffer + writePosition) = new LastPartData
+                    {
+                        LastProcessedTick = player.LastProcessedTick,
+                        LastReceivedTick = player.LastReceivedTick,
+                        Mtu = maxPartSize,
+                        BufferedInputsCount = (byte)player.AvailableInput.Count
+                    };
+                    writePosition += sizeof(LastPartData);
+                    player.Peer.SendUnreliable(new ReadOnlySpan<byte>(_packetBuffer, 0, writePosition));
+                }
+            }
+            for (ushort i = FirstEntityId; i <= MaxSyncedEntityId; i++)
+            {
+                ref var stateSerializer = ref _stateSerializers[i];
+                stateSerializer.Entity.VisibilityLayerChanged = false;
             }
 
             //trigger only when there is data

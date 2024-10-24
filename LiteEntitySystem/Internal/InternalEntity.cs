@@ -60,7 +60,7 @@ namespace LiteEntitySystem.Internal
         /// Entity version (for id reuse)
         /// </summary>
         public readonly byte Version;
-        /*
+        
         private int _visibilityLayer;
 
         /// <summary>
@@ -85,7 +85,7 @@ namespace LiteEntitySystem.Internal
         }
         internal bool VisibilityLayerChanged;
         internal int PreviousVisibilityLayer;
-        */
+        
         internal EntityDataHeader DataHeader => new EntityDataHeader
         {
             Id = Id,
@@ -190,7 +190,7 @@ namespace LiteEntitySystem.Internal
                 Logger.LogError($"Exception in entity({Id}) update:\n{e}");
             }   
         }
-        /*
+        
         internal bool IsVisibleToPlayer(NetPlayer player)
         {
             return VisibilityLayer == 0 || player != null && VisibilityLayer == player.VisibilityLayer;
@@ -212,7 +212,7 @@ namespace LiteEntitySystem.Internal
             //This entity moved from the player's layer to a different one
             return player.VisibilityLayerChanged && VisibilityLayer > 0 && player.PreviousVisibilityLayer == VisibilityLayer ||
                    VisibilityLayerChanged && player.VisibilityLayer > 0 && player.VisibilityLayer == PreviousVisibilityLayer;
-        }*/
+        }
 
         /// <summary>
         /// Fixed update. Called if entity has attribute <see cref="EntityFlagsAttribute"/> and flag Updateable
