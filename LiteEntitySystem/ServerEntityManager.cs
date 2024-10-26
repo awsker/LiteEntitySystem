@@ -565,20 +565,28 @@ namespace LiteEntitySystem
                     {
                         ref var stateSerializer = ref _stateSerializers[i];
 
-                        bool changed = changedIds.Contains(i);
-                        bool forceFullUpdate = stateSerializer.Entity.ShouldVisibilityChangeSendFull(player);
+                        ChangeType changeType = changedIds.Contains(i) && stateSerializer.Entity.IsVisibleToPlayer(player) ? ChangeType.Changed : ChangeType.None;
+                        if(stateSerializer.Entity.ShouldVisibilityChangeDestroy(player))
+                        {
+                            changeType = ChangeType.Destroy;
+                        } 
+                        else if(stateSerializer.Entity.ShouldVisibilityChangeSendFull(player))
+                        {
+                            changeType = ChangeType.FullUpdate;
+                        }
 
                         //all players has actual state so remove from sync
-                        if (changed && Utils.SequenceDiff(stateSerializer.LastChangedTick, _minimalTick) <= 0)
+                        if (changeType == ChangeType.Changed && Utils.SequenceDiff(stateSerializer.LastChangedTick, _minimalTick) <= 0)
                         {
                             _changedEntities.Remove(stateSerializer.Entity);
                             continue;
                         }
                         //skip known
-                        if (!forceFullUpdate && Utils.SequenceDiff(stateSerializer.LastChangedTick, player.StateATick) <= 0)
+                        if (changeType <= ChangeType.Changed && Utils.SequenceDiff(stateSerializer.LastChangedTick, player.StateATick) <= 0)
                             continue;
+
                         DiffResult diffResult = DiffResult.Skip;
-                        if (forceFullUpdate || changed)
+                        if (changeType > ChangeType.None)
                         {
                             diffResult = stateSerializer.MakeDiff(
                                player.Id,
@@ -587,7 +595,8 @@ namespace LiteEntitySystem
                                player.CurrentServerTick,
                                packetBuffer,
                                ref writePosition,
-                               playerController, false);
+                               playerController,
+                               changeType);
                         }
                         if (diffResult == DiffResult.DoneAndDestroy)
                         {
@@ -712,5 +721,13 @@ namespace LiteEntitySystem
             _stateSerializers[entity.Id].AddRpcPacket(rpc);
             _changedEntities.Add(entity);
         }
+    }
+
+    internal enum ChangeType
+    {
+        None,
+        Changed,
+        FullUpdate,
+        Destroy
     }
 }

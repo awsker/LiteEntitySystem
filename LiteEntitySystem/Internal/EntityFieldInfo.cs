@@ -23,6 +23,7 @@
         public readonly FieldType FieldType;
         public readonly SyncFlags Flags;
         public readonly bool IsPredicted;
+        public readonly bool IsInternalDestroyedField;
         public OnSyncExecutionOrder OnSyncExecutionOrder;
         
         public OnSyncCallDelegate OnSync;
@@ -51,6 +52,7 @@
             IsPredicted = Flags.HasFlagFast(SyncFlags.AlwaysRollback) ||
                           (!Flags.HasFlagFast(SyncFlags.OnlyForOtherPlayers) &&
                            !Flags.HasFlagFast(SyncFlags.NeverRollBack));
+            IsInternalDestroyedField = name == $"{nameof(InternalEntity)}-_isDestroyed";
         }
 
         //For syncable syncvar

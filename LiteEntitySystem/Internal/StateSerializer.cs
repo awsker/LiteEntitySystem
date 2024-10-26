@@ -247,7 +247,7 @@ namespace LiteEntitySystem.Internal
             //Logger.Log($"[SEM] SendBaseline for entity: {_entity.Id}, pos: {position}, posAfterData: {position + _fullDataSize}");
         }
 
-        public unsafe DiffResult MakeDiff(byte playerId, ushort serverTick, ushort minimalTick, ushort playerTick, byte* resultData, ref int position, HumanControllerLogic playerController, bool forceFull)
+        public unsafe DiffResult MakeDiff(byte playerId, ushort serverTick, ushort minimalTick, ushort playerTick, byte* resultData, ref int position, HumanControllerLogic playerController, ChangeType changeType)
         {
             if (_state == SerializerState.Freed)
             {
@@ -297,8 +297,8 @@ namespace LiteEntitySystem.Internal
             bool hasChanges;
 
             //send full state if needed for this player (or version changed)
-            if (forceFull || 
-                playerController != null && playerController.IsEntityNeedForceSync(Entity, playerTick) || 
+            if (changeType == ChangeType.FullUpdate ||
+                playerController != null && playerController.IsEntityNeedForceSync(Entity, playerTick) ||
                 Utils.SequenceDiff(_versionChangedTick, playerTick) > 0)
             {
                 //write full header here (totalSize + eid)
@@ -311,65 +311,84 @@ namespace LiteEntitySystem.Internal
                     RefMagic.CopyBlock(resultData + position, lastEntityData, _fullDataSize);
                 position += (int)_fullDataSize;
             }
-            else fixed (byte* lastEntityData = _latestEntityData) //make diff
+            else
             {
-                //skip diff sync if disabled
-                if (playerController != null && playerController.IsEntityDiffSyncDisabled(new EntitySharedReference(Entity.Id, Entity.Version)))
+                fixed (byte* lastEntityData = _latestEntityData) //make diff
                 {
-                    position = startPos;
-                    return DiffResult.Skip;
+                    //skip diff sync if disabled
+                    if (playerController != null && playerController.IsEntityDiffSyncDisabled(new EntitySharedReference(Entity.Id, Entity.Version)))
+                    {
+                        position = startPos;
+                        return DiffResult.Skip;
+                    }
+
+                    byte* entityDataAfterHeader = lastEntityData + HeaderSize;
+                    // -1 for cycle
+                    byte* fields = resultData + startPos + DiffHeaderSize - 1;
+                    //put entity id at 2
+                    *(ushort*)(resultData + position) = *(ushort*)lastEntityData;
+                    *fieldFlagAndSize = 0;
+                    position += sizeof(ushort) + _fieldsFlagsSize;
+                    int positionBeforeDeltaCompression = position;
+
+                    //write fields
+                    for (int i = 0; i < _fieldsCount; i++)
+                    {
+                        if (i % 8 == 0)
+                        {
+                            fields++;
+                            *fields = 0;
+                        }
+                        ref var field = ref _fields[i];
+                        //Check if the field is the destroyed flag and we've decided to destroy (hide) the object for this client
+                        bool mustSendDestroyedField = changeType == ChangeType.Destroy && field.IsInternalDestroyedField;
+
+                        //Only do quit-out-early checks if this is not the destroy field and we're forcing it to be sent
+                        if (!mustSendDestroyedField)
+                        {
+                            //skip very old and increase tick to wrap
+                            if (Utils.SequenceDiff(_fieldChangeTicks[i], minimalTick) < 0)
+                            {
+                                _fieldChangeTicks[i] = minimalTick;
+                                continue;
+                            }
+
+                            //not actual
+                            if (Utils.SequenceDiff(_fieldChangeTicks[i], playerTick) <= 0)
+                            {
+                                //Logger.Log($"SkipOld: {field.Name}");
+                                //old data
+                                continue;
+                            }
+
+                            if (((field.Flags & SyncFlags.OnlyForOwner) != 0 && !isOwned) ||
+                                ((field.Flags & SyncFlags.OnlyForOtherPlayers) != 0 && isOwned))
+                            {
+                                //Logger.Log($"SkipSync: {field.Name}, isOwned: {isOwned}");
+                                continue;
+                            }
+                        }
+
+                        *fields |= (byte)(1 << i % 8);
+
+                        if (mustSendDestroyedField)
+                        {
+                            //Send a 1 instead of the actual value of the destroyed field
+                            fixed (byte* flag = new byte[1] { 1 })
+                            {
+                                RefMagic.CopyBlock(resultData + position, flag, 1);
+                            }
+                        }
+                        else
+                        {
+                            RefMagic.CopyBlock(resultData + position, entityDataAfterHeader + field.FixedOffset, field.Size);
+                        }
+                        position += field.IntSize;
+                        //Logger.Log($"WF {_entity.GetType()} f: {_classData.Fields[i].Name}");
+                    }
+                    hasChanges = position > positionBeforeDeltaCompression;
                 }
-                
-                byte* entityDataAfterHeader = lastEntityData + HeaderSize;
-                // -1 for cycle
-                byte* fields = resultData + startPos + DiffHeaderSize - 1;
-                //put entity id at 2
-                *(ushort*)(resultData + position) = *(ushort*)lastEntityData;
-                *fieldFlagAndSize = 0;
-                position += sizeof(ushort) + _fieldsFlagsSize;
-                int positionBeforeDeltaCompression = position;
-
-                //write fields
-                for (int i = 0; i < _fieldsCount; i++)
-                {
-                    if (i % 8 == 0)
-                    {
-                        fields++;
-                        *fields = 0;
-                    }
-                    
-                    //skip very old and increase tick to wrap
-                    if (Utils.SequenceDiff(_fieldChangeTicks[i], minimalTick) < 0)
-                    {
-                        _fieldChangeTicks[i] = minimalTick;
-                        continue;
-                    }
-                    
-                    //not actual
-                    if (Utils.SequenceDiff(_fieldChangeTicks[i], playerTick) <= 0)
-                    {
-                        //Logger.Log($"SkipOld: {field.Name}");
-                        //old data
-                        continue;
-                    }
-
-                    ref var field = ref _fields[i];
-                    if (((field.Flags & SyncFlags.OnlyForOwner) != 0 && !isOwned) || 
-                        ((field.Flags & SyncFlags.OnlyForOtherPlayers) != 0 && isOwned))
-                    {
-                        //Logger.Log($"SkipSync: {field.Name}, isOwned: {isOwned}");
-                        continue;
-                    }
-                    
-                    *fields |= (byte)(1 << i % 8);
-                    RefMagic.CopyBlock(resultData + position, entityDataAfterHeader + field.FixedOffset, field.Size);
-                    position += field.IntSize;
-                    //Logger.Log($"WF {_entity.GetType()} f: {_classData.Fields[i].Name}");
-                }
-
-                hasChanges = position > positionBeforeDeltaCompression;
             }
-            
             //add RPCs count
             ushort* rpcCount = (ushort*)(resultData + position);
             *rpcCount = 0;
