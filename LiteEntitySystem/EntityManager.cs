@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using LiteEntitySystem.Collections;
 using LiteEntitySystem.Extensions;
 using LiteEntitySystem.Internal;
 
@@ -142,26 +143,25 @@ namespace LiteEntitySystem
         public bool InNormalState => UpdateMode == UpdateMode.Normal;
         
         protected const int MaxSavedStateDiff = 30;
-        protected const ushort FirstEntityId = 1;
         internal const int MaxParts = 256;
         private const int MaxTicksPerUpdate = 5;
 
         public double VisualDeltaTime { get; private set; }
         public const int MaxPlayers = byte.MaxValue-1;
-
-        protected int MaxSyncedEntityId = -1; //current maximum id
-        private int _maxLocalEntityId = -1;
+        
         protected ushort _tick;
         
-        protected readonly EntityFilter<InternalEntity> AliveEntities = new();
-        protected readonly EntityFilter<EntityLogic> LagCompensatedEntities = new();
+        protected readonly AVLTree<InternalEntity> AliveEntities = new();
+        protected readonly AVLTree<EntityLogic> LagCompensatedEntities = new();
+        protected readonly AVLTree<InternalEntity> AllEntities = new();
 
         private readonly double _stopwatchFrequency;
         private readonly Stopwatch _stopwatch = new();
-        private readonly IdGeneratorUShort _localIdQueue = new(MaxSyncedEntityCount, MaxEntityCount);
+
         private readonly SingletonEntityLogic[] _singletonEntities;
         private readonly IEntityFilter[] _entityFilters;
         private readonly Dictionary<Type, ushort> _registeredTypeIds = new();
+        private readonly Dictionary<Type, ILocalSingleton> _localSingletons = new();
 
         internal readonly InternalEntity[] EntitiesDict = new InternalEntity[MaxEntityCount+1];
         internal readonly EntityClassData[] ClassDataDict;
@@ -176,7 +176,6 @@ namespace LiteEntitySystem
         internal byte InternalPlayerId;
         protected readonly InputProcessor InputProcessor;
         protected float SpeedMultiplier;
-        protected int TotalTicksPassed;
 
         protected const float TimeSpeedChangeCoef = 0.1f;
 
@@ -186,13 +185,20 @@ namespace LiteEntitySystem
         /// IsRunning - sets to false after Reset() call
         /// </summary>
         public bool IsRunning => _stopwatch.IsRunning;
-        
+
+        /// <summary>
+        /// Register custom field type with interpolation
+        /// </summary>
+        /// <param name="interpolationDelegate">interpolation function</param>
         public static void RegisterFieldType<T>(InterpolatorDelegateWithReturn<T> interpolationDelegate) where T : unmanaged =>
             ValueTypeProcessor.Registered[typeof(T)] = new UserTypeProcessor<T>(interpolationDelegate);
         
+        /// <summary>
+        /// Register custom field type
+        /// </summary>
         public static void RegisterFieldType<T>() where T : unmanaged =>
             ValueTypeProcessor.Registered[typeof(T)] = new UserTypeProcessor<T>(null);
-
+        
         private static void RegisterBasicFieldType<T>(ValueTypeProcessor<T> proc) where T : unmanaged =>
             ValueTypeProcessor.Registered.Add(typeof(T), proc);
 
@@ -268,39 +274,26 @@ namespace LiteEntitySystem
         /// </summary>
         public virtual void Reset()
         {
+            foreach (var localSingleton in _localSingletons)
+                localSingleton.Value?.Destroy();
+            
+            _localSingletons.Clear();
             EntitiesCount = 0;
-
-            TotalTicksPassed = 0;
+            
             _tick = 0;
             VisualDeltaTime = 0.0;
             _accumulator = 0;
             _lastTime = 0;
             InternalPlayerId = 0;
-            _localIdQueue.Reset();
             _stopwatch.Stop();
             _stopwatch.Reset();
             AliveEntities.Clear();
             
-            for (int i = FirstEntityId; i <= MaxSyncedEntityId; i++)
-            {
-                EntitiesDict[i]?.DestroyInternal();
-                EntitiesDict[i] = null;
-            }
-            for (int i = MaxSyncedEntityCount; i <= _maxLocalEntityId; i++)
-            {
-                EntitiesDict[i]?.DestroyInternal();
-                EntitiesDict[i] = null;
-            }
-            for (int i = 0; i < _singletonEntities.Length; i++)
-            {
-                _singletonEntities[i]?.DestroyInternal();
-                _singletonEntities[i] = null;
-            }
-
-            for (int i = 0; i < _entityFilters.Length; i++)
-            {
-                _entityFilters[i] = null;
-            }
+            foreach (var entity in AllEntities)
+                entity.DestroyInternal();
+            AllEntities.Clear();
+            Array.Clear(EntitiesDict, 0, EntitiesDict.Length);
+            Array.Clear(_entityFilters, 0, _entityFilters.Length);
         }
 
         /// <summary>
@@ -337,19 +330,11 @@ namespace LiteEntitySystem
                 typedFilter = (EntityFilter<T>)entityFilter;
                 return typedFilter;
             }
-            
             typedFilter = new EntityFilter<T>();
             entityFilter = typedFilter;
-            for (int i = FirstEntityId; i <= MaxSyncedEntityId; i++)
+            foreach (var entity in AllEntities)
             {
-                if(EntitiesDict[i] is T castedEnt)
-                    typedFilter.Add(castedEnt);
-            }
-            while (_maxLocalEntityId > MaxSyncedEntityCount && EntitiesDict[_maxLocalEntityId] == null)
-                _maxLocalEntityId--;
-            for (int i = MaxSyncedEntityCount; i <= _maxLocalEntityId; i++)
-            {
-                if(EntitiesDict[i] is T castedEnt)
+                if(entity is T castedEnt)
                     typedFilter.Add(castedEnt);
             }
             return typedFilter;
@@ -375,14 +360,6 @@ namespace LiteEntitySystem
         /// <typeparam name="T">Singleton entity type</typeparam>
         /// <returns>Singleton entity, can throw exceptions on invalid type</returns>
         public T GetSingleton<T>() where T : SingletonEntityLogic =>
-            (T)_singletonEntities[_registeredTypeIds[typeof(T)]];
-
-        /// <summary>
-        /// Get singleton entity
-        /// </summary>
-        /// <typeparam name="T">Singleton entity type</typeparam>
-        /// <returns>Singleton entity or null if it didn't exists</returns>
-        public T GetSingletonSafe<T>() where T : SingletonEntityLogic =>
             _registeredTypeIds.TryGetValue(typeof(T), out ushort registeredId) ? _singletonEntities[registeredId] as T : null;
 
         /// <summary>
@@ -392,6 +369,34 @@ namespace LiteEntitySystem
         /// <returns></returns>
         public bool HasSingleton<T>() where T : SingletonEntityLogic =>
             _singletonEntities[_registeredTypeIds[typeof(T)]] is T;
+
+        /// <summary>
+        /// Add local (not synchronized) singleton.
+        /// </summary>
+        /// <param name="singleton">Signleton to add</param>
+        public void AddLocalSingleton<T>(T singleton) where T : ILocalSingleton =>
+            _localSingletons[typeof(T)] = singleton;
+        
+        /// <summary>
+        /// Get local (not synchronized) singleton.
+        /// </summary>
+        public T GetLocalSingleton<T>() where T : ILocalSingleton =>
+            _localSingletons.TryGetValue(typeof(T), out var singleton) && singleton is T typedSingleton ? typedSingleton : default;
+
+        /// <summary>
+        /// TryGet local (not synchronized) singleton.
+        /// </summary>
+        public bool TryGetLocalSingleton<T>(out T result) where T : ILocalSingleton
+        {
+            if (_localSingletons.TryGetValue(typeof(T), out var singleton) && singleton is T typedSingleton)
+            {
+                result = typedSingleton;
+                return true;
+            }
+
+            result = default;
+            return false;
+        }
 
         /// <summary>
         /// Try get singleton entity
@@ -415,63 +420,30 @@ namespace LiteEntitySystem
             singleton = null;
             return false;
         }
-        
-        /// <summary>
-        /// Add local entity that will be not synchronized
-        /// </summary>
-        /// <typeparam name="T">Entity type</typeparam>
-        /// <returns>Created entity or null if entities limit is reached (65535 - <see cref="MaxSyncedEntityCount"/>)</returns>
-        public T AddLocalEntity<T>(Action<T> initMethod = null) where T : InternalEntity
-        {
-            if (_localIdQueue.AvailableIds == 0)
-            {
-                Logger.LogError("Max local entities count reached");
-                return null;
-            }
-            
-            var entityParams = new EntityParams(
-                EntityClassInfo<T>.ClassId,
-                _localIdQueue.GetNewId(), 
-                0,
-                TotalTicksPassed,
-                this);
-            var entity = (T)AddEntity(entityParams);
-            if (IsClient && entity is EntityLogic logic)
-            {
-                logic.InternalOwnerId.Value = InternalPlayerId;
-            }
-
-            initMethod?.Invoke(entity);
-            ConstructEntity(entity);
-            return entity;
-        }
 
         protected InternalEntity AddEntity(EntityParams entityParams)
         {
-            if (entityParams.Id == InvalidEntityId || entityParams.Id >= EntitiesDict.Length)
+            var entityHeader = entityParams.Header;
+            if (entityHeader.Id == InvalidEntityId || entityHeader.Id >= EntitiesDict.Length)
             {
-                throw new ArgumentException($"Invalid entity id: {entityParams.Id}");
+                throw new ArgumentException($"Invalid entity id: {entityHeader.Id}");
             }
 
-            if (entityParams.ClassId >= ClassDataDict.Length)
+            if (entityHeader.ClassId >= ClassDataDict.Length)
             {
-                throw new Exception($"Unregistered entity class: {entityParams.ClassId}");
+                throw new Exception($"Unregistered entity class: {entityHeader.ClassId}");
             }
             
-            var classData = ClassDataDict[entityParams.ClassId];
+            var classData = ClassDataDict[entityHeader.ClassId];
             if (classData.EntityConstructor == null)
             {
-                throw new Exception($"Unregistered entity class: {entityParams.ClassId}");
+                throw new Exception($"Unregistered entity class: {entityHeader.ClassId}");
             }
             var entity = classData.EntityConstructor(entityParams);
             entity.RegisterRpcInternal();
-
-            if(entityParams.Id < MaxSyncedEntityCount)
-                MaxSyncedEntityId = MaxSyncedEntityId < entityParams.Id ? entityParams.Id : MaxSyncedEntityId;
-            else
-                _maxLocalEntityId = _maxLocalEntityId < entityParams.Id ? entityParams.Id : _maxLocalEntityId;
             
-            EntitiesDict[entity.Id] = entity;
+            if(entity.Id < EntitiesDict.Length)
+                EntitiesDict[entity.Id] = entity;
             EntitiesCount++;
             return entity;
         }
@@ -479,7 +451,6 @@ namespace LiteEntitySystem
         protected void ConstructEntity(InternalEntity e)
         {
             ref var classData = ref ClassDataDict[e.ClassId];
-            
             if (classData.IsSingleton)
             {
                 _singletonEntities[classData.FilterId] = (SingletonEntityLogic)e;
@@ -496,23 +467,30 @@ namespace LiteEntitySystem
                     _entityFilters[baseId]?.Add(e);
             }
             
-
-            if (IsEntityAlive(classData, e))
+            AllEntities.Add(e);
+            if (IsEntityAlive(classData.Flags, e))
+            {
                 AliveEntities.Add(e);
+                OnAliveEntityAdded(e);
+            }
             if (IsEntityLagCompensated(e))
                 LagCompensatedEntities.Add((EntityLogic)e);
+        }
+        
+        protected virtual void OnAliveEntityAdded(InternalEntity e)
+        {
+            
         }
 
         private static bool IsEntityLagCompensated(InternalEntity e)
             => !e.IsLocal && e is EntityLogic && e.ClassData.LagCompensatedCount > 0;
 
-        private bool IsEntityAlive(EntityClassData classData, InternalEntity entity)
-            => classData.Flags.HasFlagFast(EntityFlags.Updateable) && (IsServer || entity.IsLocal || (IsClient && classData.Flags.HasFlagFast(EntityFlags.UpdateOnClient)));
+        private bool IsEntityAlive(EntityFlags flags, InternalEntity entity)
+            => flags.HasFlagFast(EntityFlags.Updateable) && (IsServer || entity.IsLocal || (IsClient && flags.HasFlagFast(EntityFlags.UpdateOnClient)));
 
-        internal virtual void RemoveEntity(InternalEntity e)
+        internal virtual void OnEntityDestroyed(InternalEntity e)
         {
             ref var classData = ref ClassDataDict[e.ClassId];
-            
             if (classData.IsSingleton)
             {
                 _singletonEntities[classData.FilterId] = null;
@@ -525,15 +503,21 @@ namespace LiteEntitySystem
                 foreach (int baseId in classData.BaseIds) 
                     _entityFilters[baseId]?.Remove(e);
             }
-
-            if (IsEntityAlive(classData, e))
-                AliveEntities.Remove(e);
             if(IsEntityLagCompensated(e))
                 LagCompensatedEntities.Remove((EntityLogic)e);
-            if (classData.Flags.HasFlagFast(EntityFlags.LocalOnly))
-                _localIdQueue.ReuseId(e.Id);
-            EntitiesDict[e.Id] = null;
+            if (IsEntityAlive(classData.Flags, e))
+                AliveEntities.Remove(e);
+        }
+        
+        protected void RemoveEntity(InternalEntity e)
+        {
+            if(!e.IsDestroyed)
+                Logger.LogError($"Remove not destroyed entity!: {e}");
+            AllEntities.Remove(e);
+            if(e.Id < EntitiesDict.Length)
+                EntitiesDict[e.Id] = null;
             EntitiesCount--;
+            ClassDataDict[e.ClassId].ReleaseDataCache(e);
             //Logger.Log($"{Mode} - RemoveEntity: {e.Id}");
         }
         
@@ -577,6 +561,11 @@ namespace LiteEntitySystem
             long elapsedTicks = _stopwatch.ElapsedTicks;
             long ticksDelta = elapsedTicks - _lastTime;
             VisualDeltaTime = ticksDelta * _stopwatchFrequency;
+            
+            foreach (var localSingleton in _localSingletons)
+                if(localSingleton.Value is ILocalSingletonWithUpdate updSingleton)
+                    updSingleton.VisualUpdate((float)VisualDeltaTime);
+            
             _accumulator += ticksDelta;
             _lastTime = elapsedTicks;
             long maxTicks = (long)(_deltaTimeTicks + SpeedMultiplier * _slowdownTicks);
@@ -591,9 +580,12 @@ namespace LiteEntitySystem
                     _accumulator = 0;
                     return;
                 }
+
+                foreach (var localSingleton in _localSingletons)
+                    if(localSingleton.Value is ILocalSingletonWithUpdate updSingleton)
+                        updSingleton.Update(DeltaTimeF);
                 OnLogicTick();
                 _tick++;
-                TotalTicksPassed++;
 
                 _accumulator -= maxTicks;
                 updates++;

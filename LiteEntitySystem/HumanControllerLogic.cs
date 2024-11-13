@@ -39,8 +39,7 @@ namespace LiteEntitySystem
             }
             else if (enable && _skippedEntities.Remove(entity))
             {
-                _forceSyncEntities[entity] = EntityManager.Tick;
-                ServerManager.EntityChanged(entity);
+                ForceSyncEntity(entity);
                 ExecuteRPC(OnEntitySyncChangedRPC, new EntitySyncInfo { Entity = entity, SyncEnabled = true });
             }
         }
@@ -75,11 +74,17 @@ namespace LiteEntitySystem
                 var entity = EntityManager.GetEntityById<EntityLogic>(entityRef);
                 if(entity == null)
                     continue;
-                _forceSyncEntities.Add(entity, EntityManager.Tick);
-                ServerManager.EntityChanged(entity);
+                ForceSyncEntity(entity);
                 ExecuteRPC(OnEntitySyncChangedRPC, new EntitySyncInfo { Entity = entity, SyncEnabled = false });
             }
             _skippedEntities.Clear();
+        }
+
+        //add to force sync list and trigger force entity sync in state serializer
+        internal void ForceSyncEntity(InternalEntity entity)
+        {
+            _forceSyncEntities[entity] = EntityManager.Tick;
+            ServerManager.ForceEntitySync(entity);
         }
 
         //is entity need force sync
@@ -330,8 +335,8 @@ namespace LiteEntitySystem
                 _awaitingRequests = new Dictionary<ushort, Action<bool>>();
             _requestWriter.Put(EntityManager.HeaderByte);
             _requestWriter.Put(InternalPackets.ClientRequest);
-            _requestWriter.Put(entityParams.Id);
-            _requestWriter.Put(entityParams.Version);
+            _requestWriter.Put(entityParams.Header.Id);
+            _requestWriter.Put(entityParams.Header.Version);
         }
     }
 

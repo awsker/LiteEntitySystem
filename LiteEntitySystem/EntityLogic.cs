@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using LiteEntitySystem.Extensions;
 using LiteEntitySystem.Internal;
 
 namespace LiteEntitySystem
@@ -19,14 +20,9 @@ namespace LiteEntitySystem
         Updateable = 1 << 1,                    
         
         /// <summary>
-        /// Entity is local only without sync (only on server or client no difference)
-        /// </summary>
-        LocalOnly = 1 << 2,                     
-        
-        /// <summary>
         /// Sync entity only for owner player
         /// </summary>
-        OnlyForOwner = 1 << 3
+        OnlyForOwner = 1 << 2
     }
     
     [AttributeUsage(AttributeTargets.Class)]
@@ -51,16 +47,20 @@ namespace LiteEntitySystem
         /// <summary>
         /// Child entities (can be used for transforms or as components)
         /// </summary>
-        public HashSet<EntityLogic> Childs => _childsSet ??= new HashSet<EntityLogic>();
-        private HashSet<EntityLogic> _childsSet;
-        
+        public readonly SyncHashSet<EntitySharedReference> Childs = new();
+
         public EntitySharedReference ParentId => _parentId;
         
         private bool _lagCompensationEnabled;
         
         public EntitySharedReference SharedReference => new EntitySharedReference(this);
+
+        [SyncVarFlags(SyncFlags.OnlyForOwner)]
+        private SyncVar<ushort> _localPredictedIdCounter;
+        [SyncVarFlags(SyncFlags.OnlyForOwner)]
+        private SyncVar<ushort> _predictedId;
         
-        internal void WriteHistory(ushort tick) => ClassData.WriteHistory(this, tick);
+        internal ulong PredictedId => _predictedId.Value;
         
         //on client it works only in rollback
         internal void EnableLagCompensation(NetPlayer player)
@@ -112,34 +112,93 @@ namespace LiteEntitySystem
         
         /// <summary>
         /// Create predicted entity (like projectile) that will be replaced by server entity if prediction is successful
+        /// Should be called also in rollback mode
         /// </summary>
         /// <typeparam name="T">Entity type</typeparam>
         /// <param name="initMethod">Method that will be called after entity constructed</param>
         /// <returns>Created predicted local entity</returns>
         public T AddPredictedEntity<T>(Action<T> initMethod = null) where T : EntityLogic
         {
+            T entity;
             if (EntityManager.IsServer)
             {
-                if (InternalOwnerId.Value == EntityManager.ServerPlayerId)
-                {
-                    return ServerManager.AddEntity(initMethod);
-                }
+                entity = ServerManager.AddEntity(this, initMethod);
+                entity._predictedId.Value = _localPredictedIdCounter.Value++;
+                return entity;
+            }
 
-                var predictedEntity = ServerManager.AddEntity(initMethod);
-                var player = ServerManager.GetPlayer(InternalOwnerId);
-                ushort playerServerTick = Utils.LerpSequence(player.StateATick, player.StateBTick, player.LerpTime);
-                while (playerServerTick != ServerManager.Tick)
-                {
-                    predictedEntity.Update();
-                    playerServerTick++;
-                }
-
-                return predictedEntity;
+            if (IsRemoteControlled)
+            {
+                Logger.LogError("AddPredictedEntity called on RemoteControlled");
+                return null;
             }
             
-            var entity = EntityManager.AddLocalEntity(initMethod);
-            ClientManager.AddPredictedInfo(entity);
+            if (EntityManager.InRollBackState)
+            {
+                //local counter here should be reset
+                ushort potentialId = _localPredictedIdCounter.Value++;
+                entity = ClientManager.FindEntityByPredictedId(ClientManager.RollBackTick, Id, potentialId) as T;
+                if (entity == null)
+                {
+                    Logger.LogWarning("Misspredicted entity add?");
+                }
+                else
+                {
+                    //add to childs on rollback
+                    Childs.Add(entity);
+                }
+                return entity;
+            }
+
+            entity = ClientManager.AddLocalEntity(initMethod);
+            entity._predictedId.Value = _localPredictedIdCounter.Value++;
+            entity._parentId.Value = new EntitySharedReference(this);
+            entity.InternalOwnerId.Value = InternalOwnerId.Value;
+            entity.OnParentChange(EntitySharedReference.Empty);
+            entity.OnOwnerChange(EntityManager.InternalPlayerId);
             return entity;
+        }
+        
+        /// <summary>
+        /// Create predicted entity (like projectile) that will be replaced by server entity if prediction is successful
+        /// Should be called also in rollback mode if you use EntityLogic.Childs
+        /// </summary>
+        /// <typeparam name="T">Entity type</typeparam>
+        /// <param name="targetReference">SyncVar of class that will be set to predicted entity and synchronized once confirmation will be received</param>
+        /// <param name="initMethod">Method that will be called after entity constructed</param>
+        /// <returns>Created predicted local entity</returns>
+        public void AddPredictedEntity<T>(ref SyncVar<EntitySharedReference> targetReference, Action<T> initMethod = null) where T : EntityLogic
+        {
+            T entity;
+            if (EntityManager.InRollBackState)
+            {
+                if (EntityManager.TryGetEntityById(targetReference.Value, out entity) && entity.IsLocal)
+                {
+                    //add to childs on rollback
+                    Childs.Add(entity);
+                }
+                return;
+            }
+            
+            if (EntityManager.IsServer)
+            {
+                entity = ServerManager.AddEntity(this, initMethod);
+                targetReference.Value = entity;
+                return;
+            }
+
+            if (IsRemoteControlled)
+            {
+                Logger.LogError("AddPredictedEntity called on RemoteControlled");
+                return;
+            }
+
+            entity = ClientManager.AddLocalEntity(initMethod);
+            entity._parentId.Value = new EntitySharedReference(this);
+            entity.InternalOwnerId.Value = InternalOwnerId.Value;
+            entity.OnParentChange(EntitySharedReference.Empty);
+            entity.OnOwnerChange(EntityManager.InternalPlayerId);
+            targetReference.Value = entity;
         }
 
         /// <summary>
@@ -169,10 +228,8 @@ namespace LiteEntitySystem
         /// </summary>
         /// <typeparam name="T">Type of entity</typeparam>
         /// <returns>parent entity</returns>
-        public T GetParent<T>() where T : EntityLogic
-        {
-            return EntityManager.GetEntityById<T>(_parentId);
-        }
+        public T GetParent<T>() where T : EntityLogic =>
+            EntityManager.GetEntityById<T>(_parentId);
         
         /// <summary>
         /// Called when lag compensation was started for this entity
@@ -196,10 +253,10 @@ namespace LiteEntitySystem
                 return;
 
             //temporary copy childs to array because childSet can be modified inside
-            var childsCopy = _childsSet?.ToArray();
+            var childsCopy = Childs.ToArray();
             if (childsCopy != null) //notify child entities about parent destruction
-                foreach (var entityLogic in childsCopy)
-                    entityLogic.OnBeforeParentDestroy();
+                foreach (var entityLogicRef in childsCopy)
+                    EntityManager.GetEntityById<EntityLogic>(entityLogicRef)?.OnBeforeParentDestroy();
 
             base.DestroyInternal();
             if (EntityManager.IsClient && IsLocalControlled && !IsLocal)
@@ -207,14 +264,13 @@ namespace LiteEntitySystem
                 ClientManager.RemoveOwned(this);
             }
             var parent = EntityManager.GetEntityById<EntityLogic>(_parentId);
-            if (parent != null && !parent.IsDestroyed && parent._childsSet != null)
+            if (parent != null && !parent.IsDestroyed)
             {
-                parent._childsSet.Remove(this);
+                parent.Childs.Remove(this);
             }
-
-            if (_childsSet != null)
-                foreach (var entityLogic in _childsSet)
-                    entityLogic.Destroy();
+            
+            foreach (var entityLogicRef in Childs)
+                EntityManager.GetEntityById<EntityLogic>(entityLogicRef).Destroy();
         }
 
         /// <summary>
@@ -227,27 +283,28 @@ namespace LiteEntitySystem
         
         private void OnOwnerChange(byte prevOwner)
         {
-            if(IsLocalControlled && !IsLocal)
-                ClientManager.AddOwned(this);
-            else if(prevOwner == EntityManager.InternalPlayerId && !IsLocal)
+            if (IsLocal)
+                return;
+            if(prevOwner == EntityManager.InternalPlayerId)
                 ClientManager.RemoveOwned(this);
+            if(InternalOwnerId.Value == EntityManager.InternalPlayerId)
+                ClientManager.AddOwned(this);
         }
 
         private void OnParentChange(EntitySharedReference oldId)
         {
-            EntityManager.GetEntityById<EntityLogic>(oldId)?._childsSet?.Remove(this);
+            EntityManager.GetEntityById<EntityLogic>(oldId)?.Childs.Remove(this);
             EntityManager.GetEntityById<EntityLogic>(_parentId)?.Childs.Add(this);
         }
 
         internal static void SetOwner(EntityLogic entity, byte ownerId)
         {
             entity.InternalOwnerId.Value = ownerId;
-            entity.ServerManager.EntityOwnerChanged(entity);
-            if (entity._childsSet == null) 
-                return;
-            foreach (var child in entity._childsSet)
+            if (ownerId != EntityManager.ServerPlayerId)
+                entity.ServerManager.GetPlayerController(ownerId)?.ForceSyncEntity(entity);
+            foreach (var child in entity.Childs)
             {
-                SetOwner(child, ownerId);
+                SetOwner(entity.EntityManager.GetEntityById<EntityLogic>(child), ownerId);
             }
         }
         
