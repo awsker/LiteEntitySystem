@@ -78,6 +78,7 @@
             IsPredicted = Flags.HasFlagFast(SyncFlags.AlwaysRollback) ||
                           (!Flags.HasFlagFast(SyncFlags.OnlyForOtherPlayers) &&
                            !Flags.HasFlagFast(SyncFlags.NeverRollBack));
+            IsInternalDestroyedField = name == $"{nameof(InternalEntity)}-_isDestroyed";
         }
     }
 }
