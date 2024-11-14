@@ -605,7 +605,7 @@ namespace LiteEntitySystem
                         if (changeType <= ChangeType.Changed && Utils.SequenceDiff(stateSerializer.LastChangedTick, player.StateATick) <= 0)
                             continue;
 
-                        if (stateSerializer.MakeDiff(
+                        if (changeType > ChangeType.None && stateSerializer.MakeDiff(
                             player.Id,
                             _tick,
                             _minimalTick,
