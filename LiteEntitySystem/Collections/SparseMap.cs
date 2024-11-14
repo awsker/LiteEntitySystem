@@ -160,8 +160,8 @@ namespace LiteEntitySystem.Collections
 
         public IEnumerator<T> GetEnumerator()
         {
-            foreach (var v in _dense.Select(d => d.Value))
-                yield return v;
+            for (int i = 0; i < _count; ++i)
+                yield return _dense[i].Value;
         }
 
         IEnumerator IEnumerable.GetEnumerator()
