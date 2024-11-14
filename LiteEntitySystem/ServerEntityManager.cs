@@ -658,6 +658,15 @@ namespace LiteEntitySystem
                     writePosition += sizeof(LastPartData);
                     player.Peer.SendUnreliable(new ReadOnlySpan<byte>(_packetBuffer, 0, writePosition));
                 }
+                //Reset visibility changed status
+                foreach (var player in _netPlayers)
+                {
+                    player.VisibilityLayerChanged = false;
+                }
+                foreach (var e in AllEntities)
+                {
+                    e.VisibilityLayerChanged = false;
+                }
             }
 
             //trigger only when there is data

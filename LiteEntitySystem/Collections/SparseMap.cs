@@ -1,8 +1,11 @@
 ﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace LiteEntitySystem.Collections
 {
-    public class SparseMap<T>
+    public class SparseMap<T> : IEnumerable<T>
     {
         public struct SparseEntry
         {
@@ -153,6 +156,17 @@ namespace LiteEntitySystem.Collections
         public void Clear()
         {
             _count = 0;
+        }
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            foreach (var v in _dense.Select(d => d.Value))
+                yield return v;
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return this.GetEnumerator();
         }
     }
 }
